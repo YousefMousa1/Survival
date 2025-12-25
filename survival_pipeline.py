@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
-from survival_lib.io import load_clinical, load_expression
+from survival_lib.io import load_clinical, load_expression, load_expression_genes
 from survival_lib.models import cv_cox, fit_elastic_net_cox, univariate_cox
 from survival_lib.preprocess import fit_pca, qc_and_scale
 from survival_lib.reports import build_combined_report, top_genes_by_component
@@ -24,6 +25,11 @@ def main():
         "--expression-file",
         default="data_mrna_illumina_microarray_zscores_ref_diploid_samples.txt",
         help="Expression matrix filename inside data-dir.",
+    )
+    parser.add_argument(
+        "--ihc4-expression-file",
+        default="data_mrna_illumina_microarray.txt",
+        help="Expression matrix filename for reduced IHC4 mode.",
     )
     parser.add_argument(
         "--clinical-file",
@@ -48,6 +54,7 @@ def main():
         default=0,
         help="Read expression in chunks (rows per chunk) for large matrices.",
     )
+    parser.add_argument("--reduced-ihc4", action="store_true")
     parser.add_argument("--max-missing", type=float, default=0.2)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
@@ -125,74 +132,135 @@ def main():
     clinical_path = data_dir / args.clinical_file
 
     clinical = load_clinical(clinical_path, args.duration_col, args.event_col)
-    expr = load_expression(
-        expr_path,
-        sample_ids=clinical["sample_id"].tolist(),
-        chunk_size=args.chunk_size if args.chunk_size > 0 else None,
-    )
 
-    shared_samples = sorted(set(expr.columns).intersection(clinical["sample_id"]))
-    if not shared_samples:
-        raise SystemExit("No shared samples between expression and clinical data.")
+    if args.reduced_ihc4:
+        clinical_full = pd.read_csv(clinical_path, sep="\t", comment="#", low_memory=False)
+        keep_cols = {
+            "PATIENT_ID": "sample_id",
+            "Age at Diagnosis": "age",
+            "Chemotherapy": "chemotherapy",
+            "ER status measured by IHC": "er_ihc",
+            "Hormone Therapy": "hormone_therapy",
+            "Radio Therapy": "radio_therapy",
+        }
+        missing = [c for c in keep_cols if c not in clinical_full.columns]
+        if missing:
+            raise SystemExit(f"Missing clinical columns for IHC4: {missing}")
+        clinical_red = clinical_full[list(keep_cols.keys())].rename(columns=keep_cols)
 
-    expr = expr[shared_samples]
-    clinical = clinical.set_index("sample_id").loc[shared_samples]
+        def to_binary(series):
+            values = series.astype(str).str.strip().str.lower()
+            mapping = {
+                "yes": 1,
+                "no": 0,
+                "positive": 1,
+                "positve": 1,
+                "negative": 0,
+            }
+            return values.map(mapping)
 
-    x_scaled = qc_and_scale(expr, args.max_missing, args.top_genes)
-    if args.embedding == "pca":
-        pca, z = fit_pca(x_scaled, args.n_components, args.random_state)
-    else:
-        from survival_lib.tjepa import train_tjepa, tjepa_forward_only
+        clinical_red["age"] = pd.to_numeric(clinical_red["age"], errors="coerce")
+        clinical_red["chemotherapy"] = to_binary(clinical_red["chemotherapy"])
+        clinical_red["er_ihc"] = to_binary(clinical_red["er_ihc"])
+        clinical_red["hormone_therapy"] = to_binary(clinical_red["hormone_therapy"])
+        clinical_red["radio_therapy"] = to_binary(clinical_red["radio_therapy"])
+        clinical_red = clinical_red.dropna()
 
-        if args.tjepa_forward_only:
-            z_array = tjepa_forward_only(
-                x_scaled,
-                embed_dim=args.tjepa_embed_dim,
-                num_layers=args.tjepa_num_layers,
-                num_heads=args.tjepa_num_heads,
-                mlp_dim=args.tjepa_mlp_dim,
-                dropout=args.tjepa_dropout,
-                activation=args.tjepa_activation,
-                n_cls_tokens=args.tjepa_n_cls_tokens,
-                seed=args.random_state,
-                device=args.tjepa_device,
-            )
-        else:
-            z_array = train_tjepa(
-                x_scaled,
-                embed_dim=args.tjepa_embed_dim,
-                num_layers=args.tjepa_num_layers,
-                num_heads=args.tjepa_num_heads,
-                mlp_dim=args.tjepa_mlp_dim,
-                dropout=args.tjepa_dropout,
-                activation=args.tjepa_activation,
-                pred_embed_dim=args.tjepa_pred_embed_dim,
-                pred_num_layers=args.tjepa_pred_num_layers,
-                pred_num_heads=args.tjepa_pred_num_heads,
-                pred_dropout=args.tjepa_pred_dropout,
-                pred_dim_feedforward=args.tjepa_pred_dim_feedforward,
-                mask_allow_overlap=args.tjepa_mask_allow_overlap,
-                mask_min_ctx_share=args.tjepa_mask_min_ctx_share,
-                mask_max_ctx_share=args.tjepa_mask_max_ctx_share,
-                mask_min_trgt_share=args.tjepa_mask_min_trgt_share,
-                mask_max_trgt_share=args.tjepa_mask_max_trgt_share,
-                mask_num_preds=args.tjepa_mask_num_preds,
-                mask_num_encs=args.tjepa_mask_num_encs,
-                n_cls_tokens=args.tjepa_n_cls_tokens,
-                epochs=args.tjepa_epochs,
-                batch_size=args.tjepa_batch_size,
-                lr=args.tjepa_lr,
-                weight_decay=args.tjepa_weight_decay,
-                momentum=args.tjepa_momentum,
-                seed=args.random_state,
-                device=args.tjepa_device,
-            )
-        z = pd.DataFrame(
-            z_array,
-            index=x_scaled.index,
-            columns=[f"TJEPA{i+1}" for i in range(z_array.shape[1])],
+        genes = ["EGFR", "PGR", "ERBB2", "MKI67"]
+        expr_genes = load_expression_genes(
+            data_dir / args.ihc4_expression_file,
+            genes,
+            sample_ids=clinical_red["sample_id"].tolist(),
+            chunk_size=args.chunk_size if args.chunk_size > 0 else None,
         )
+        if expr_genes.empty:
+            raise SystemExit("No IHC4 genes found in expression file.")
+        expr_genes = expr_genes.T
+
+        merged = clinical_red.set_index("sample_id").join(expr_genes, how="inner")
+        merged = merged.dropna()
+        if merged.empty:
+            raise SystemExit("No samples after merging clinical and gene features.")
+
+        continuous_cols = ["age"] + genes
+        scaler = StandardScaler()
+        merged[continuous_cols] = scaler.fit_transform(merged[continuous_cols])
+        x_scaled = merged[
+            continuous_cols
+            + ["chemotherapy", "er_ihc", "hormone_therapy", "radio_therapy"]
+        ]
+        clinical = clinical.set_index("sample_id").loc[merged.index]
         pca = None
+        z = x_scaled
+    else:
+        expr = load_expression(
+            expr_path,
+            sample_ids=clinical["sample_id"].tolist(),
+            chunk_size=args.chunk_size if args.chunk_size > 0 else None,
+        )
+
+        shared_samples = sorted(set(expr.columns).intersection(clinical["sample_id"]))
+        if not shared_samples:
+            raise SystemExit("No shared samples between expression and clinical data.")
+
+        expr = expr[shared_samples]
+        clinical = clinical.set_index("sample_id").loc[shared_samples]
+
+        x_scaled = qc_and_scale(expr, args.max_missing, args.top_genes)
+        if args.embedding == "pca":
+            pca, z = fit_pca(x_scaled, args.n_components, args.random_state)
+        else:
+            from survival_lib.tjepa import train_tjepa, tjepa_forward_only
+
+            if args.tjepa_forward_only:
+                z_array = tjepa_forward_only(
+                    x_scaled,
+                    embed_dim=args.tjepa_embed_dim,
+                    num_layers=args.tjepa_num_layers,
+                    num_heads=args.tjepa_num_heads,
+                    mlp_dim=args.tjepa_mlp_dim,
+                    dropout=args.tjepa_dropout,
+                    activation=args.tjepa_activation,
+                    n_cls_tokens=args.tjepa_n_cls_tokens,
+                    seed=args.random_state,
+                    device=args.tjepa_device,
+                )
+            else:
+                z_array = train_tjepa(
+                    x_scaled,
+                    embed_dim=args.tjepa_embed_dim,
+                    num_layers=args.tjepa_num_layers,
+                    num_heads=args.tjepa_num_heads,
+                    mlp_dim=args.tjepa_mlp_dim,
+                    dropout=args.tjepa_dropout,
+                    activation=args.tjepa_activation,
+                    pred_embed_dim=args.tjepa_pred_embed_dim,
+                    pred_num_layers=args.tjepa_pred_num_layers,
+                    pred_num_heads=args.tjepa_pred_num_heads,
+                    pred_dropout=args.tjepa_pred_dropout,
+                    pred_dim_feedforward=args.tjepa_pred_dim_feedforward,
+                    mask_allow_overlap=args.tjepa_mask_allow_overlap,
+                    mask_min_ctx_share=args.tjepa_mask_min_ctx_share,
+                    mask_max_ctx_share=args.tjepa_mask_max_ctx_share,
+                    mask_min_trgt_share=args.tjepa_mask_min_trgt_share,
+                    mask_max_trgt_share=args.tjepa_mask_max_trgt_share,
+                    mask_num_preds=args.tjepa_mask_num_preds,
+                    mask_num_encs=args.tjepa_mask_num_encs,
+                    n_cls_tokens=args.tjepa_n_cls_tokens,
+                    epochs=args.tjepa_epochs,
+                    batch_size=args.tjepa_batch_size,
+                    lr=args.tjepa_lr,
+                    weight_decay=args.tjepa_weight_decay,
+                    momentum=args.tjepa_momentum,
+                    seed=args.random_state,
+                    device=args.tjepa_device,
+                )
+            z = pd.DataFrame(
+                z_array,
+                index=x_scaled.index,
+                columns=[f"TJEPA{i+1}" for i in range(z_array.shape[1])],
+            )
+            pca = None
 
     if args.min_embed_variance > 0:
         embed_var = z.var(axis=0)
@@ -246,7 +314,7 @@ def main():
         "c_index_mean": float(np.mean(c_indexes)),
         "c_index_std": float(np.std(c_indexes)),
         "c_index_folds": c_indexes,
-        "n_samples": int(len(shared_samples)),
+        "n_samples": int(z.shape[0]),
         "n_genes": int(x_scaled.shape[1]),
         "duration_col": args.duration_col,
         "event_col": args.event_col,

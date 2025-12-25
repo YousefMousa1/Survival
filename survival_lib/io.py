@@ -66,3 +66,41 @@ def load_expression(path, sample_ids=None, chunk_size=None):
     if "Entrez_Gene_Id" not in expr.columns:
         raise ValueError("Expression file missing Entrez_Gene_Id")
     return _normalize_expression(expr)
+
+
+def load_expression_genes(path, genes, sample_ids=None, chunk_size=None):
+    genes = {g.upper() for g in genes}
+    usecols = None
+    if sample_ids is not None:
+        available = set(get_expression_samples(path))
+        keep = [sid for sid in sample_ids if sid in available]
+        usecols = ["Hugo_Symbol", "Entrez_Gene_Id"] + keep
+
+    chunks = []
+    reader = pd.read_csv(
+        path,
+        sep="\t",
+        low_memory=False,
+        usecols=usecols,
+        chunksize=chunk_size or 10000,
+    )
+    for chunk in reader:
+        chunk["Hugo_Symbol"] = chunk["Hugo_Symbol"].astype(str)
+        subset = chunk[chunk["Hugo_Symbol"].str.upper().isin(genes)]
+        if subset.empty:
+            continue
+        chunks.append(subset)
+
+    if not chunks:
+        return pd.DataFrame()
+
+    expr = pd.concat(chunks, axis=0)
+    expr["Hugo_Symbol"] = expr["Hugo_Symbol"].astype(str)
+    data_cols = [
+        c for c in expr.columns if c not in ("Hugo_Symbol", "Entrez_Gene_Id")
+    ]
+    expr[data_cols] = expr[data_cols].apply(pd.to_numeric, errors="coerce")
+    expr = expr.drop(columns=["Entrez_Gene_Id"])
+    expr = expr.set_index("Hugo_Symbol")
+    expr = expr.groupby(level=0).mean()
+    return expr
