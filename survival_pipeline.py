@@ -198,8 +198,63 @@ def main():
             + ["chemotherapy", "er_ihc", "hormone_therapy", "radio_therapy"]
         ]
         clinical = clinical.set_index("sample_id").loc[merged.index]
-        pca = None
-        z = x_scaled
+        if args.embedding == "pca":
+            pca, z = fit_pca(x_scaled, args.n_components, args.random_state)
+        elif args.embedding == "tjepa":
+            from survival_lib.tjepa import train_tjepa, tjepa_forward_only
+
+            if args.tjepa_forward_only:
+                z_array = tjepa_forward_only(
+                    x_scaled,
+                    embed_dim=args.tjepa_embed_dim,
+                    num_layers=args.tjepa_num_layers,
+                    num_heads=args.tjepa_num_heads,
+                    mlp_dim=args.tjepa_mlp_dim,
+                    dropout=args.tjepa_dropout,
+                    activation=args.tjepa_activation,
+                    n_cls_tokens=args.tjepa_n_cls_tokens,
+                    seed=args.random_state,
+                    device=args.tjepa_device,
+                )
+            else:
+                z_array = train_tjepa(
+                    x_scaled,
+                    embed_dim=args.tjepa_embed_dim,
+                    num_layers=args.tjepa_num_layers,
+                    num_heads=args.tjepa_num_heads,
+                    mlp_dim=args.tjepa_mlp_dim,
+                    dropout=args.tjepa_dropout,
+                    activation=args.tjepa_activation,
+                    pred_embed_dim=args.tjepa_pred_embed_dim,
+                    pred_num_layers=args.tjepa_pred_num_layers,
+                    pred_num_heads=args.tjepa_pred_num_heads,
+                    pred_dropout=args.tjepa_pred_dropout,
+                    pred_dim_feedforward=args.tjepa_pred_dim_feedforward,
+                    mask_allow_overlap=args.tjepa_mask_allow_overlap,
+                    mask_min_ctx_share=args.tjepa_mask_min_ctx_share,
+                    mask_max_ctx_share=args.tjepa_mask_max_ctx_share,
+                    mask_min_trgt_share=args.tjepa_mask_min_trgt_share,
+                    mask_max_trgt_share=args.tjepa_mask_max_trgt_share,
+                    mask_num_preds=args.tjepa_mask_num_preds,
+                    mask_num_encs=args.tjepa_mask_num_encs,
+                    n_cls_tokens=args.tjepa_n_cls_tokens,
+                    epochs=args.tjepa_epochs,
+                    batch_size=args.tjepa_batch_size,
+                    lr=args.tjepa_lr,
+                    weight_decay=args.tjepa_weight_decay,
+                    momentum=args.tjepa_momentum,
+                    seed=args.random_state,
+                    device=args.tjepa_device,
+                )
+            z = pd.DataFrame(
+                z_array,
+                index=x_scaled.index,
+                columns=[f"TJEPA{i+1}" for i in range(z_array.shape[1])],
+            )
+            pca = None
+        else:
+            pca = None
+            z = x_scaled
     else:
         expr = load_expression(
             expr_path,
