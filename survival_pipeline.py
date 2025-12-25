@@ -86,6 +86,12 @@ def main():
     parser.add_argument("--tjepa-device", default=None)
     parser.add_argument("--tjepa-forward-only", action="store_true")
     parser.add_argument("--top-genes-per-component", type=int, default=25)
+    parser.add_argument(
+        "--min-embed-variance",
+        type=float,
+        default=0.0,
+        help="Drop embedding dimensions with variance below this threshold.",
+    )
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--run-univariate-cox", action="store_true")
     parser.add_argument("--run-elastic-net-cox", action="store_true")
@@ -187,6 +193,11 @@ def main():
             columns=[f"TJEPA{i+1}" for i in range(z_array.shape[1])],
         )
         pca = None
+
+    if args.min_embed_variance > 0:
+        embed_var = z.var(axis=0)
+        keep_cols = embed_var[embed_var >= args.min_embed_variance].index
+        z = z[keep_cols]
 
     c_indexes = cv_cox(
         z,
