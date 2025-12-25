@@ -55,6 +55,7 @@ def main():
         help="Read expression in chunks (rows per chunk) for large matrices.",
     )
     parser.add_argument("--reduced-ihc4", action="store_true")
+    parser.add_argument("--add-clinical-ihc4", action="store_true")
     parser.add_argument("--max-missing", type=float, default=0.2)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
@@ -270,6 +271,60 @@ def main():
         clinical = clinical.set_index("sample_id").loc[shared_samples]
 
         x_scaled = qc_and_scale(expr, args.max_missing, args.top_genes)
+        if args.add_clinical_ihc4:
+            clinical_full = pd.read_csv(
+                clinical_path, sep="\t", comment="#", low_memory=False
+            )
+            col_candidates = {
+                "sample_id": ["PATIENT_ID", "Patient Identifier"],
+                "age": ["Age at Diagnosis", "AGE_AT_DIAGNOSIS"],
+                "chemotherapy": ["Chemotherapy", "CHEMOTHERAPY"],
+                "er_ihc": ["ER status measured by IHC", "ER_IHC"],
+                "hormone_therapy": ["Hormone Therapy", "HORMONE_THERAPY"],
+                "radio_therapy": ["Radio Therapy", "RADIO_THERAPY"],
+            }
+            resolved = {}
+            for target, candidates in col_candidates.items():
+                for cand in candidates:
+                    if cand in clinical_full.columns:
+                        resolved[target] = cand
+                        break
+            missing = [k for k in col_candidates if k not in resolved]
+            if missing:
+                raise SystemExit(f"Missing clinical columns for IHC4: {missing}")
+            clinical_red = clinical_full[list(resolved.values())].rename(
+                columns={v: k for k, v in resolved.items()}
+            )
+
+            def to_binary(series):
+                values = series.astype(str).str.strip().str.lower()
+                mapping = {
+                    "yes": 1,
+                    "no": 0,
+                    "positive": 1,
+                    "positve": 1,
+                    "negative": 0,
+                }
+                return values.map(mapping)
+
+            clinical_red["age"] = pd.to_numeric(clinical_red["age"], errors="coerce")
+            clinical_red["chemotherapy"] = to_binary(clinical_red["chemotherapy"])
+            clinical_red["er_ihc"] = to_binary(clinical_red["er_ihc"])
+            clinical_red["hormone_therapy"] = to_binary(clinical_red["hormone_therapy"])
+            clinical_red["radio_therapy"] = to_binary(clinical_red["radio_therapy"])
+            clinical_red = clinical_red.dropna()
+            clinical_red = clinical_red.set_index("sample_id")
+
+            age_scaler = StandardScaler()
+            clinical_red[["age"]] = age_scaler.fit_transform(clinical_red[["age"]])
+
+            x_scaled = x_scaled.join(
+                clinical_red[
+                    ["age", "chemotherapy", "er_ihc", "hormone_therapy", "radio_therapy"]
+                ],
+                how="inner",
+            )
+            clinical = clinical.loc[x_scaled.index]
         if args.embedding == "pca":
             pca, z = fit_pca(x_scaled, args.n_components, args.random_state)
         else:
