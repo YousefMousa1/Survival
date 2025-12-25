@@ -135,18 +135,26 @@ def main():
 
     if args.reduced_ihc4:
         clinical_full = pd.read_csv(clinical_path, sep="\t", comment="#", low_memory=False)
-        keep_cols = {
-            "PATIENT_ID": "sample_id",
-            "Age at Diagnosis": "age",
-            "Chemotherapy": "chemotherapy",
-            "ER status measured by IHC": "er_ihc",
-            "Hormone Therapy": "hormone_therapy",
-            "Radio Therapy": "radio_therapy",
+        col_candidates = {
+            "sample_id": ["PATIENT_ID", "Patient Identifier"],
+            "age": ["Age at Diagnosis", "AGE_AT_DIAGNOSIS"],
+            "chemotherapy": ["Chemotherapy", "CHEMOTHERAPY"],
+            "er_ihc": ["ER status measured by IHC", "ER_IHC"],
+            "hormone_therapy": ["Hormone Therapy", "HORMONE_THERAPY"],
+            "radio_therapy": ["Radio Therapy", "RADIO_THERAPY"],
         }
-        missing = [c for c in keep_cols if c not in clinical_full.columns]
+        resolved = {}
+        for target, candidates in col_candidates.items():
+            for cand in candidates:
+                if cand in clinical_full.columns:
+                    resolved[target] = cand
+                    break
+        missing = [k for k in col_candidates if k not in resolved]
         if missing:
             raise SystemExit(f"Missing clinical columns for IHC4: {missing}")
-        clinical_red = clinical_full[list(keep_cols.keys())].rename(columns=keep_cols)
+        clinical_red = clinical_full[list(resolved.values())].rename(
+            columns={v: k for k, v in resolved.items()}
+        )
 
         def to_binary(series):
             values = series.astype(str).str.strip().str.lower()
